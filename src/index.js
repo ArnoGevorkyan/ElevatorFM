@@ -24,6 +24,7 @@ const {
 
 // --- Config & constants ---
 const TRACKS_DIR = path.join(__dirname, '..', 'tracks');
+const NOTIFICATION_SOUND = path.join(TRACKS_DIR, 'notification.mp3');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
   console.error('BOT_TOKEN is missing in .env');
@@ -36,6 +37,7 @@ function loadTracks() {
   return fs
     .readdirSync(TRACKS_DIR)
     .filter((file) => /\.(mp3|wav|ogg)$/i.test(file))
+    .filter((file) => file.toLowerCase() !== 'notification.mp3')
     .map((file) => ({
       name: path.parse(file).name,
       file,
@@ -138,6 +140,35 @@ async function connectToChannel(channel) {
   return voiceConnection;
 }
 
+function playNotificationThenTrack(trackName) {
+  const track = getTrack(trackName);
+  if (!track) throw new Error(`Track '${trackName}' not found`);
+  currentTrack = track.name;
+
+  stopFfmpeg();
+
+  // Check if notification sound exists
+  if (fs.existsSync(NOTIFICATION_SOUND)) {
+    // Play notification sound first (one-shot, no loop)
+    const notificationResource = createAudioResource(NOTIFICATION_SOUND);
+    player.play(notificationResource);
+
+    // When notification finishes, start the floor music
+    const onIdle = (oldState, newState) => {
+      if (newState.status === AudioPlayerStatus.Idle) {
+        player.off('stateChange', onIdle);
+        const resource = createLoopingResource(track.fullPath);
+        player.play(resource);
+      }
+    };
+    player.on('stateChange', onIdle);
+  } else {
+    // No notification sound, play track directly
+    const resource = createLoopingResource(track.fullPath);
+    player.play(resource);
+  }
+}
+
 function playTrack(trackName) {
   const track = getTrack(trackName);
   if (!track) throw new Error(`Track '${trackName}' not found`);
@@ -179,7 +210,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const trackName = interaction.customId.slice(6);
     try {
       await ensureConnected(interaction);
-      playTrack(trackName);
+      playNotificationThenTrack(trackName);
       refreshTracks();
       const buttons = tracks.slice(0, 25).map((t) =>
         new ButtonBuilder()
