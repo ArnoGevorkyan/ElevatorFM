@@ -6,7 +6,10 @@ const {
   Client,
   GatewayIntentBits,
   Events,
-  ChannelType
+  ChannelType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require('discord.js');
 const {
   joinVoiceChannel,
@@ -171,6 +174,30 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  // Handle button interactions
+  if (interaction.isButton() && interaction.customId.startsWith('floor:')) {
+    const trackName = interaction.customId.slice(6);
+    try {
+      await ensureConnected(interaction);
+      playTrack(trackName);
+      refreshTracks();
+      const buttons = tracks.slice(0, 25).map((t) =>
+        new ButtonBuilder()
+          .setCustomId(`floor:${t.name}`)
+          .setLabel(t.name)
+          .setStyle(currentTrack === t.name ? ButtonStyle.Success : ButtonStyle.Primary)
+      );
+      const rows = [];
+      for (let i = 0; i < buttons.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+      }
+      return interaction.update({ content: `Now playing floor **${trackName}**.`, components: rows });
+    } catch (err) {
+      console.error('Button error:', err);
+      return interaction.reply({ content: err.message, ephemeral: true });
+    }
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   try {
@@ -193,15 +220,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!tracks.length) {
         return interaction.reply({ content: 'No tracks found. Upload .mp3/.wav/.ogg files to the tracks/ folder.', ephemeral: true });
       }
-      const name = interaction.options.getString('name', true);
-      const track = getTrack(name);
-      if (!track) {
-        const available = tracks.map((t) => t.name).join(', ');
-        return interaction.reply({ content: `Unknown floor '${name}'. Available floors: ${available}`, ephemeral: true });
+      const buttons = tracks.slice(0, 25).map((t) =>
+        new ButtonBuilder()
+          .setCustomId(`floor:${t.name}`)
+          .setLabel(t.name)
+          .setStyle(currentTrack === t.name ? ButtonStyle.Success : ButtonStyle.Primary)
+      );
+      const rows = [];
+      for (let i = 0; i < buttons.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
       }
-      await ensureConnected(interaction);
-      playTrack(track.name);
-      return interaction.reply({ content: `Now playing floor **${track.name}**.`, ephemeral: false });
+      return interaction.reply({ content: 'Choose a floor:', components: rows, ephemeral: true });
     }
 
     if (interaction.commandName === 'floors') {

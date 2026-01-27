@@ -40,16 +40,7 @@ const commands = [
   },
   {
     name: 'floor',
-    description: 'Switch to a specific floor (track)',
-    options: [
-      {
-        name: 'name',
-        description: 'Floor name',
-        type: 3, // STRING
-        required: true,
-        choices: floorChoices.length ? floorChoices : undefined
-      }
-    ].filter(Boolean)
+    description: 'Choose a floor (track) to play'
   },
   {
     name: 'floors',
