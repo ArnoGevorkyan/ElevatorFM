@@ -22,8 +22,8 @@ echo "[update] updating to origin/$BRANCH"
 # Reset tracked files to remote
 git reset --hard "origin/$BRANCH"
 
-# Install production deps (skip scripts for safety)
-npm install --production --ignore-scripts
+# Install production deps
+npm install --omit=dev
 
 # Restart bot if running
 if pm2 list | grep -q "elevator-fm"; then
