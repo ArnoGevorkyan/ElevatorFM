@@ -21,6 +21,7 @@ const {
   entersState,
   StreamType
 } = require('@discordjs/voice');
+const prism = require('prism-media');
 
 // --- Config & constants ---
 const TRACKS_DIR = path.join(__dirname, '..', 'tracks');
@@ -64,6 +65,8 @@ const client = new Client({
 let voiceConnection = null;
 let currentTrack = null;
 let currentFfmpeg = null;
+const FADE_DURATION_SEC = 5; // 5 seconds fade out
+
 const player = createAudioPlayer({
   behaviors: { noSubscriber: NoSubscriberBehavior.Play }
 });
@@ -74,6 +77,8 @@ function stopFfmpeg() {
     currentFfmpeg = null;
   }
 }
+
+let volumeTransformer = null;
 
 function createLoopingResource(filePath) {
   // Uses ffmpeg -stream_loop -1 for gapless looping
@@ -94,11 +99,54 @@ function createLoopingResource(filePath) {
     }
   });
 
-  const resource = createAudioResource(ffmpeg.stdout, {
+  // Create volume transformer for fade control
+  volumeTransformer = new prism.VolumeTransformer({ type: 's16le', volume: 1 });
+  console.log('[createLoopingResource] Created volumeTransformer');
+  const audioStream = ffmpeg.stdout.pipe(volumeTransformer);
+
+  const resource = createAudioResource(audioStream, {
     inputType: StreamType.Raw,
     metadata: { track: path.parse(filePath).name }
   });
   return resource;
+}
+
+function fadeOut() {
+  return new Promise((resolve) => {
+    console.log('[fadeOut] Starting fade, volumeTransformer:', !!volumeTransformer);
+    if (!volumeTransformer) {
+      console.log('[fadeOut] No volumeTransformer, skipping');
+      resolve();
+      return;
+    }
+
+    const steps = 30;
+    const stepTime = (FADE_DURATION_SEC * 1000) / steps;
+    let currentVolume = volumeTransformer.volume || 1;
+    console.log('[fadeOut] Initial volume:', currentVolume, 'stepTime:', stepTime);
+
+    const fadeInterval = setInterval(() => {
+      currentVolume -= (1 / steps);
+      if (currentVolume <= 0) {
+        clearInterval(fadeInterval);
+        try {
+          volumeTransformer.setVolume(0);
+        } catch (e) {
+          console.error('[fadeOut] setVolume error:', e.message);
+        }
+        console.log('[fadeOut] Fade complete');
+        resolve();
+      } else {
+        try {
+          volumeTransformer.setVolume(currentVolume);
+        } catch (e) {
+          console.error('[fadeOut] setVolume error:', e.message);
+          clearInterval(fadeInterval);
+          resolve();
+        }
+      }
+    }, stepTime);
+  });
 }
 
 player.on('error', (err) => {
@@ -140,11 +188,22 @@ async function connectToChannel(channel) {
   return voiceConnection;
 }
 
-function playNotificationThenTrack(trackName) {
+async function playNotificationThenTrack(trackName) {
   const track = getTrack(trackName);
   if (!track) throw new Error(`Track '${trackName}' not found`);
-  currentTrack = track.name;
 
+  console.log('[playNotificationThenTrack] Player status:', player.state.status);
+
+  // Fade out current track if playing
+  if (player.state.status === AudioPlayerStatus.Playing) {
+    console.log('[playNotificationThenTrack] Starting fade out...');
+    await fadeOut();
+    console.log('[playNotificationThenTrack] Fade out done');
+  } else {
+    console.log('[playNotificationThenTrack] Not playing, skipping fade');
+  }
+
+  currentTrack = track.name;
   stopFfmpeg();
 
   // Check if notification sound exists
@@ -209,8 +268,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton() && interaction.customId.startsWith('floor:')) {
     const trackName = interaction.customId.slice(6);
     try {
+      // Defer immediately to avoid timeout (we have 5 sec fade)
+      await interaction.deferUpdate();
+
       await ensureConnected(interaction);
-      playNotificationThenTrack(trackName);
+      await playNotificationThenTrack(trackName);
       refreshTracks();
       const buttons = tracks.slice(0, 25).map((t) =>
         new ButtonBuilder()
@@ -222,10 +284,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       for (let i = 0; i < buttons.length; i += 5) {
         rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
       }
-      return interaction.update({ content: `Now playing floor **${trackName}**.`, components: rows });
+      return interaction.editReply({ content: `Now playing floor **${trackName}**.`, components: rows });
     } catch (err) {
       console.error('Button error:', err);
-      return interaction.reply({ content: err.message, ephemeral: true });
+      if (!interaction.replied && !interaction.deferred) {
+        return interaction.reply({ content: err.message, ephemeral: true });
+      }
+      return interaction.editReply({ content: err.message });
     }
   }
 
