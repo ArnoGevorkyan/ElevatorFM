@@ -26,10 +26,32 @@ const prism = require('prism-media');
 // --- Config & constants ---
 const TRACKS_DIR = path.join(__dirname, '..', 'tracks');
 const NOTIFICATION_SOUND = path.join(TRACKS_DIR, 'notification.mp3');
+const STATE_FILE = path.join(__dirname, '..', 'state.json');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
   console.error('BOT_TOKEN is missing in .env');
   process.exit(1);
+}
+
+// --- State persistence ---
+function loadState() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Failed to load state:', e.message);
+  }
+  return {};
+}
+
+function saveState(state) {
+  try {
+    const current = loadState();
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ ...current, ...state }, null, 2));
+  } catch (e) {
+    console.error('Failed to save state:', e.message);
+  }
 }
 
 // --- Helpers ---
@@ -175,16 +197,50 @@ async function connectToChannel(channel) {
     selfDeaf: true
   });
 
-  voiceConnection.on('stateChange', (oldState, newState) => {
+  voiceConnection.on('stateChange', async (oldState, newState) => {
     if (newState.status === VoiceConnectionStatus.Disconnected) {
-      entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5000).catch(() => {
-        try { voiceConnection.destroy(); } catch (_) {}
-      });
+      // Try to reconnect
+      try {
+        await entersState(voiceConnection, VoiceConnectionStatus.Connecting, 5000);
+      } catch {
+        // Could not reconnect in 5 sec, try to rejoin the channel
+        console.log('Disconnected, attempting to rejoin...');
+        try {
+          voiceConnection.destroy();
+        } catch (_) {}
+
+        // Attempt to rejoin with exponential backoff
+        const state = loadState();
+        if (state.lastChannelId) {
+          let delay = 1000;
+          for (let attempt = 1; attempt <= 5; attempt++) {
+            try {
+              console.log(`Rejoin attempt ${attempt}/5...`);
+              const ch = await client.channels.fetch(state.lastChannelId);
+              if (ch?.isVoiceBased()) {
+                await connectToChannel(ch);
+                if (currentTrack) playTrack(currentTrack);
+                console.log('Rejoined successfully');
+                return;
+              }
+            } catch (e) {
+              console.error(`Rejoin attempt ${attempt} failed:`, e.message);
+            }
+            await new Promise(r => setTimeout(r, delay));
+            delay *= 2; // 1s, 2s, 4s, 8s, 16s
+          }
+          console.error('All rejoin attempts failed');
+        }
+      }
     }
   });
 
   voiceConnection.subscribe(player);
   await entersState(voiceConnection, VoiceConnectionStatus.Ready, 20_000);
+
+  // Save last channel for auto-rejoin on restart
+  saveState({ lastChannelId: channel.id, lastGuildId: channel.guild.id });
+
   return voiceConnection;
 }
 
@@ -232,6 +288,7 @@ function playTrack(trackName) {
   const track = getTrack(trackName);
   if (!track) throw new Error(`Track '${trackName}' not found`);
   currentTrack = track.name;
+  saveState({ lastTrack: track.name });
 
   stopFfmpeg();
   const resource = createLoopingResource(track.fullPath);
@@ -249,16 +306,22 @@ async function ensureConnected(interaction) {
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`Elevator FM ready as ${c.user.tag}`);
-  if (process.env.START_VOICE_CHANNEL_ID) {
+
+  // Try to rejoin last channel from saved state
+  const state = loadState();
+  if (state.lastChannelId) {
     try {
-      const channel = await c.channels.fetch(process.env.START_VOICE_CHANNEL_ID);
+      const channel = await c.channels.fetch(state.lastChannelId);
       if (channel?.isVoiceBased()) {
         await connectToChannel(channel);
         refreshTracks();
-        if (tracks.length) playTrack(tracks[0].name);
+        // Resume last track or play first available
+        const trackToPlay = state.lastTrack && getTrack(state.lastTrack) ? state.lastTrack : (tracks.length ? tracks[0].name : null);
+        if (trackToPlay) playTrack(trackToPlay);
+        console.log(`Auto-rejoined channel: ${channel.name}`);
       }
     } catch (err) {
-      console.error('Auto-join failed:', err.message);
+      console.error('Auto-rejoin failed:', err.message);
     }
   }
 });
@@ -357,5 +420,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 process.on('SIGINT', () => { stopFfmpeg(); process.exit(0); });
 process.on('SIGTERM', () => { stopFfmpeg(); process.exit(0); });
+
+// Handle unhandled errors to prevent crashes
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err.message || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err.message || err);
+  // Don't exit - let the bot try to recover
+});
 
 client.login(BOT_TOKEN);
