@@ -103,11 +103,12 @@ function stopFfmpeg() {
 let volumeTransformer = null;
 
 function createLoopingResource(filePath) {
-  // Uses ffmpeg -stream_loop -1 for gapless looping
+  // aloop loads audio into memory and loops seamlessly (no MP3 encoder delay gaps)
+  // size=2e9 = max ~2GB of samples in memory (enough for long tracks)
   const ffmpeg = spawn('ffmpeg', [
     '-loglevel', 'quiet',
-    '-stream_loop', '-1',
     '-i', filePath,
+    '-af', 'aloop=loop=-1:size=2e9',
     '-ar', '48000', // discord sample rate
     '-ac', '2',     // stereo
     '-f', 's16le',
